@@ -2,104 +2,140 @@
 
 import asyncHandler from 'express-async-handler';
 import Journal from '../models/JournalModel.js';
-import { callAIForPrompt, callAIForSummary } from '../utils/aiService.js'; // Placeholder for AI calls
+import { callAIForPrompt, callAIForSummary, callAIForMultiModal } from '../utils/aiService.js'; // Placeholder for AI calls
 // import { transcribeAudio } from '../utils/audioService.js'; // Placeholder for STT
 // import { uploadToS3 } from '../utils/storageService.js'; // Placeholder for image storage
 
 // @desc    Start a new journal session
 // @route   POST /api/journals/start
 const startSession = asyncHandler(async (req, res) => {
-    console.log("Body",req.body);
-    console.log("User",req.user);
+    console.log("🎯 START SESSION CALLED - Body:", req.body);
+    console.log("🎯 START SESSION CALLED - User:", req.user._id);
+    
     const { initialMood, initialEnergyLevel } = req.body;
     
-    // 1. Validate input
     if (!initialMood || !initialEnergyLevel) {
+        console.log("❌ Missing mood or energy");
         res.status(400);
         throw new Error('Please provide both mood and energy level.');
     }
 
-    // 2. Create the initial journal document
+    // Create journal
     const newJournal = await Journal.create({
-        userId: req.user._id, // Set by protect middleware
+        userId: req.user._id,
         initialMood,
         initialEnergyLevel,
         status: 'in_progress',
         rawConversation: [],
     });
     
-    // 3. Call AI to get the starting question
-    const startingQuestion = await callAIForPrompt(initialMood, initialEnergyLevel);
-    // const startingQuestion = `Since your mood is ${initialMood} and energy is ${initialEnergyLevel}, let's start with this: What is one small thing you accomplished today?`; // MOCK AI
-
-    // 4. Add the initial AI turn to the conversation history
+    console.log("📝 Journal created:", newJournal._id);
+    
+    // Call AI - with empty history for first message
+    console.log("🤖 Calling AI for first question...");
+    const startingQuestion = await callAIForPrompt([], initialMood, initialEnergyLevel);
+    console.log("🤖 AI Response:", startingQuestion);
+    
+    // Add to conversation
     newJournal.rawConversation.push({
         speaker: 'ai',
         text: startingQuestion,
         inputType: 'system',
     });
+    
     await newJournal.save();
+    console.log("💾 Journal saved with AI response");
 
     res.status(201).json({ 
         journalId: newJournal._id,
         firstQuestion: startingQuestion,
-        // Send back any other necessary session data
     });
 });
-
-
-// @desc    Continue the journal session (User input -> AI response)
-// @route   POST /api/journals/continue/:id
 const continueSession = asyncHandler(async (req, res) => {
-    const journalId = req.params.id;
-    const { userInput, inputType, mediaUrl } = req.body; 
-    
-    const journal = await Journal.findById(journalId);
+    console.log("🔄 CONTINUE SESSION - Journal ID:", req.params.id);
+    console.log("🔄 Body:", req.body);
+    console.log("🔄 File:", req.file ? `Yes - ${req.file.originalname}` : 'No file');
 
-    if (!journal || journal.userId.toString() !== req.user._id.toString() || journal.status === 'completed') {
+    const journalId = req.params.id;
+    const { userInput, inputType } = req.body; 
+    const file = req.file;
+
+    const journal = await Journal.findById(journalId);
+    console.log("📖 Found journal:", journal ? "Yes" : "No");
+
+    if (!journal) {
         res.status(404);
-        throw new Error('Journal session not found or already completed.');
+        throw new Error('Journal session not found.');
+    }
+
+    if (journal.userId.toString() !== req.user._id.toString()) {
+        res.status(403);
+        throw new Error('Not authorized for this journal.');
+    }
+
+    if (journal.status === 'completed') {
+        res.status(400);
+        throw new Error('Journal session already completed.');
     }
     
-    // --- File Handling Logic (Simplified for now) ---
-    let userText = userInput;
-    // NOTE: For real implementation, audio/image processing happens here:
-    // if (inputType === 'audio') { userText = await transcribeAudio(mediaUrl); }
-    // if (inputType === 'image') { userText = await captionImage(mediaUrl); } 
+    let processedText = userInput || '';
+    
+    // Handle file if present
+    if (file) {
+        console.log("📁 Processing file:", file.mimetype);
+        try {
+            const fileResult = await callAIForMultiModal(file.buffer, file.mimetype, journal.rawConversation);
+            processedText = fileResult.text;
+            console.log("📁 File processed to text:", processedText.substring(0, 100) + "...");
+        } catch (fileError) {
+            console.error("File processing failed:", fileError);
+            processedText = userInput || "I shared a file with my thoughts.";
+        }
+    }
 
-    // 1. Add User's Turn
+    // Validate we have content
+    if (!processedText.trim()) {
+        res.status(400);
+        throw new Error('Please provide some text or a file to continue.');
+    }
+
+    // Add user message
     journal.rawConversation.push({
         speaker: 'user',
-        text: userText,
+        text: processedText,
         inputType: inputType || 'text',
-        mediaUrl: mediaUrl || undefined,
+        timestamp: new Date()
     });
 
-    const currentHistory = journal.rawConversation.map(t => ({
-        speaker: t.speaker,
-        text: t.text,
+    console.log("📊 Conversation history length:", journal.rawConversation.length);
+    
+    // Prepare history for AI
+    const currentHistory = journal.rawConversation.map(turn => ({
+        speaker: turn.speaker,
+        text: turn.text
     }));
 
-    // 2. Call AI for the next response
+    console.log("🤖 Calling AI with history...");
     const aiResponse = await callAIForPrompt(currentHistory);
-    // const conversationHistory = journal.rawConversation.map(t => `${t.speaker}: ${t.text}`).join('\n');
-    // const aiResponse = await callAIForPrompt(conversationHistory); 
-    // const aiResponse = `That's an interesting point about ${userText.substring(0, 20)}... Can you tell me more about how that made you feel?`; // MOCK AI
-
-    // 3. Add AI's Turn
+    console.log("🤖 AI Response received:", aiResponse.substring(0, 100) + "...");
+    
+    // Add AI response
     journal.rawConversation.push({
         speaker: 'ai',
         text: aiResponse,
         inputType: 'system',
+        timestamp: new Date()
     });
 
+    // FIX: Use 'journal' not 'newJournal'
     await journal.save();
+    console.log("💾 Conversation updated and saved");
 
     res.status(200).json({ 
         aiResponse,
+        success: true
     });
 });
-
 
 // @desc    Complete the journal session and save summary
 // @route   POST /api/journals/complete/:id

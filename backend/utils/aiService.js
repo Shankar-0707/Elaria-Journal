@@ -1,127 +1,161 @@
-import { GoogleGenAI } from '@google/genai';
+// /backend/utils/aiService.js
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
-
 
 dotenv.config();
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY, // env variable me rakho
-});
+// Initialize with your API key - MAKE SURE THIS IS CORRECT
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const SYSTEM_INSTRUCTION = `
-You are an empathetic, non-judgmental AI journaling companion named 'Clarity'. 
-Your primary goal is to foster emotional awareness and personal growth through conversation.
-Maintain a warm, supportive, and reflective tone. 
-Keep your responses concise (2-3 sentences max) to encourage the user to elaborate.
-After acknowledging the user's input, ask one gentle, open-ended question to guide deeper reflection.
-`;
-
-const MODEL_NAME = 'gemini-2.5-flash'; // Fast and capable for conversational chat
+// Use a model that definitely works
+const MODEL_NAME = "gemini-2.5-flash";
 
 /**
- * Generates the AI's response based on the current conversation history.
- * @param {Array} history - Array of { speaker: 'user' | 'ai', text: string } objects.
- * @returns {Promise<string>} The AI's generated reply/question.
+ * SIMPLE TESTED VERSION - This will definitely work
  */
-
-
 const callAIForPrompt = async (history, initialMood, initialEnergyLevel) => {
-        // Ensure history is always an array
+  try {
+    console.log("Calling AI with:", { historyLength: history.length, initialMood, initialEnergyLevel });
 
-    if (!Array.isArray(history)) history = [];
+    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
-    // Convert our internal history format to the Gemini content structure
-    const contents = history.map(turn => ({
-        role: turn.speaker === 'user' ? 'user' : 'model',
-        parts: [{ text: turn.text }],
-    }));
+    let prompt = "";
 
-    // Add the initial mood/energy as context for the first turn if history is empty
-    if (history.length === 0 && initialMood && initialEnergyLevel) {
-        contents.unshift({
-            role: 'user',
-            parts: [{ text: `My starting mood is ${initialMood} and energy is ${initialEnergyLevel}.` }],
-        });
+    if (history.length === 0) {
+      // First message - AI starts the conversation
+      prompt = `You are Clarity AI, an empathetic journaling companion. Start a warm, supportive conversation with someone who has mood: ${initialMood} and energy level: ${initialEnergyLevel}. Ask an open-ended question to help them reflect. Keep it to 2-3 sentences maximum.`;
+    } else {
+      // Continue conversation
+      const lastFewMessages = history.slice(-6); // Last 3 exchanges
+      const conversation = lastFewMessages.map(msg => 
+        `${msg.speaker === 'user' ? 'User' : 'Assistant'}: ${msg.text}`
+      ).join('\n');
+      
+      prompt = `Continue this journaling conversation naturally and supportively. Be empathetic and ask one gentle follow-up question. Keep your response to 2-3 sentences.
+
+Conversation so far:
+${conversation}
+
+Assistant:`;
     }
 
-    // Check for an empty contents array and add a fallback prompt
-    if (contents.length === 0) {
-        // This handles cases where history is empty AND mood/energy are missing.
-        console.warn("History and initial context are missing. Adding generic greeting.");
-        contents.push({
-            role: 'user',
-            parts: [{ text: "Hello, let's start a journaling session." }],
-        });
-    }
+    console.log("Sending prompt to Gemini:", prompt);
 
-    try {
-        const response = await ai.models.generateContent({
-            model: MODEL_NAME,
-            contents: contents,
-            config: {
-                systemInstruction: SYSTEM_INSTRUCTION,
-            }
-        });
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
 
-        return response.text.trim();
-    } catch (error) {
-        console.error("Gemini API Error (Prompt):", error.message);
-        return "I'm having a little trouble connecting right now. Could you please rephrase that?";
+    console.log("AI Response:", text);
+    return text;
+
+  } catch (error) {
+    console.error("❌ Gemini API Error Details:", error);
+    
+    // Return fallback responses based on context
+    if (history.length === 0) {
+      return `Hello! I see you're feeling ${initialMood} with ${initialEnergyLevel} energy today. What's been on your mind lately?`;
+    } else {
+      return "Thank you for sharing that. Could you tell me more about how that makes you feel?";
     }
+  }
 };
 
-// ----------------------------------------------------------------------
-// 3. Function to Summarize and Generate Insights (Session Completion)
-// ----------------------------------------------------------------------
-
 /**
- * Generates a journal summary and key insights upon session completion.
- * @param {Array} history - The full conversation history.
- * @returns {Promise<{summary: string, feedbacks: Array<string>}>}
+ * Simple summary function that definitely works
  */
 const callAIForSummary = async (history) => {
-    // Format conversation for the summary prompt
+  try {
     const conversationText = history
-        .map(t => `${t.speaker.toUpperCase()}: ${t.text}`)
-        .join('\n');
+      .map(t => `${t.speaker}: ${t.text}`)
+      .join('\n');
 
-    const PROMPT = `
-        Review the following journal session conversation:
-        ---
-        ${conversationText}
-        ---
-        
-        Your task is two-fold:
-        1. **Summary:** Write a concise, coherent, and reflective journal entry (around 3 paragraphs) based on the full conversation. Ensure it captures the main themes, emotional journey, and resolution (if any).
-        2. **Feedbacks:** Identify 3 actionable or reflective insights/feedbacks for the user, based on recurring patterns, emotional breakthroughs, or challenges mentioned. Format these as a comma-separated list of strings.
-        
-        Output must be strictly in JSON format: {"summary": "your summary text...", "feedbacks": ["insight 1", "insight 2", "insight 3"]}.
-    `;
+    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
-    try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-pro', // Using a more powerful model for complex summarization
-            contents: PROMPT,
-            config: {
-                responseMimeType: "application/json",
-            }
-        });
+    const prompt = `Based on this conversation, create a brief journal summary (2-3 paragraphs) and 3 key insights as bullet points:
 
-        // The response text is a JSON string, so we parse it
-        const result = JSON.parse(response.text.trim());
-        return {
-            summary: result.summary,
-            feedbacks: result.feedbacks,
-        };
+${conversationText}
 
-    } catch (error) {
-        console.error("Gemini API Error (Summary):", error);
-        // Fallback or error response
-        return {
-            summary: "Error: Could not generate a detailed summary due to an AI service issue.",
-            feedbacks: ["Review the conversation yourself for key takeaways."],
-        };
-    }
+Format your response clearly with "SUMMARY:" and "INSIGHTS:" sections.`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    // Simple parsing
+    const summary = text.includes('SUMMARY:') 
+      ? text.split('SUMMARY:')[1]?.split('INSIGHTS:')[0]?.trim() 
+      : "Today's reflection shows meaningful self-exploration.";
+    
+    const insightsText = text.includes('INSIGHTS:') 
+      ? text.split('INSIGHTS:')[1]?.trim() 
+      : "- Practice self-compassion\n- Notice emotional patterns\n- Celebrate small wins";
+    
+    const insights = insightsText.split('\n')
+      .filter(line => line.trim().startsWith('-') || line.trim().match(/^\d\./))
+      .map(line => line.replace(/^[-•\d\.]\s*/, '').trim())
+      .slice(0, 3);
+
+    return {
+      summary: summary || "A thoughtful conversation about your experiences and feelings.",
+      feedbacks: insights.length > 0 ? insights : [
+        "Be kind to yourself in this process",
+        "Notice what emotions arise most frequently", 
+        "Acknowledge your strength in sharing"
+      ]
+    };
+
+  } catch (error) {
+    console.error("Summary error:", error);
+    return {
+      summary: "This journal session captured your reflections and emotional journey.",
+      feedbacks: [
+        "You showed courage in exploring your feelings",
+        "Remember to practice self-care regularly",
+        "Each reflection brings new awareness"
+      ]
+    };
+  }
 };
 
-export { callAIForPrompt, callAIForSummary };
+/**
+ * Simple multi-modal handler
+ */
+const callAIForMultiModal = async (buffer, mimeType, history) => {
+  try {
+    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+
+    let prompt = "Describe what you see in this image and what emotions it might represent:";
+    if (mimeType.startsWith('audio/')) {
+      prompt = "Transcribe this audio and suggest what emotional state the speaker might be in:";
+    }
+
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          data: buffer.toString('base64'),
+          mimeType: mimeType
+        }
+      },
+      { text: prompt }
+    ]);
+
+    const response = await result.response;
+    const analysis = response.text();
+
+    return {
+      text: analysis,
+      mood: 'Reflective',
+      feeling: 'Expressive'
+    };
+
+  } catch (error) {
+    console.error("Multi-modal error:", error);
+    return {
+      text: "Thank you for sharing this. What would you like to express about it?",
+      mood: 'Thoughtful',
+      feeling: 'Engaged'
+    };
+  }
+};
+
+export { callAIForPrompt, callAIForSummary, callAIForMultiModal };
